@@ -502,16 +502,16 @@ NUMBERS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7�
 async def poll(
     ctx,
     question: str,
-    opt1: str = None,
-    opt2: str = None,
-    opt3: str = None,
-    opt4: str = None,
-    opt5: str = None,
-    opt6: str = None,
-    opt7: str = None,
-    opt8: str = None,
-    opt9: str = None,
-    opt10: str = None,
+    opt1: str | None = None,
+    opt2: str | None = None,
+    opt3: str | None = None,
+    opt4: str | None = None,
+    opt5: str | None = None,
+    opt6: str | None = None,
+    opt7: str | None = None,
+    opt8: str | None = None,
+    opt9: str | None = None,
+    opt10: str | None = None,   
 ):
     options = [
         o for o in (opt1, opt2, opt3, opt4, opt5, opt6, opt7, opt8, opt9, opt10) if o
@@ -739,7 +739,6 @@ async def check_reminders():
 
 @check_reminders.before_loop
 async def before_check_reminders():
-    # don't start hitting channels/db until the bot is fully connected
     await bot.wait_until_ready()
 
 
