@@ -65,7 +65,7 @@ BUMPER_ROLE_NAME = "Bumper"
 CARLBOT_PREFIX = "c!"
 
 # NOTE: set to false when u confirm matching works
-BUMP_DEBUG = True
+BUMP_DEBUG = false
 
 BUMP_SERVICES = {
     DISBOARD_BOT_ID: {
