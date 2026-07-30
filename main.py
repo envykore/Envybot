@@ -54,10 +54,6 @@ DISBOARD_BOT_ID = 302050872383242240
 CARL_BOT_ID = 235148962103951360
 
 # Discord message flag bit for "IS_COMPONENTS_V2" (1 << 15).
-# Bots using Components V2 put all their visible text inside message.components
-# instead of message.content or message.embeds. Kept as a fallback text source
-# below in case some bump bot ever sends this way, though Carl-bot turned out
-# to just use plain content.
 COMPONENTS_V2_FLAG = 1 << 15
 
 # TODO: make this a per-guild setting (like prefix/log_channel) instead of a
@@ -66,11 +62,9 @@ COMPONENTS_V2_FLAG = 1 << 15
 BUMPER_ROLE_NAME = "Bumper"
 
 # Your Carl-bot text-command prefix. Used to detect "c!bump" invocations
-# since text commands carry no interaction metadata to check against.
 CARLBOT_PREFIX = "c!"
 
-# TEMP: flip to False once you've confirmed the phrase matching works and
-# don't need the console spam anymore.
+# NOTE: set to false when u confirm matching works
 BUMP_DEBUG = True
 
 BUMP_SERVICES = {
@@ -84,47 +78,25 @@ BUMP_SERVICES = {
     CARL_BOT_ID: {
         "name": "Carl-bot",
         "cooldown": 5 * 3600,
-        # Carl-bot is also our mod bot (warnings/automod/etc.), so this list
-        # is deliberately narrow - "bump" alone is too easy to false-positive
-        # on. NOTE: adjust if Carl-bot's exact wording differs on your server.
         "success_phrases": ("successfully bumped",),
     },
 }
 
-# channel_id -> timestamp of the last "c!bump" text command seen in that
-# channel. Since Carl-bot text-command responses carry no interaction
-# metadata, this is how we confirm a plain-text Carl-bot message actually
-# followed a real bump invocation rather than being some unrelated mod
-# message that happens to mention "bump".
 _pending_carlbot_bump_invocations = {}
 _BUMP_INVOCATION_WINDOW_SECONDS = 10
 
 
 def extract_components_text(components) -> list[str]:
-    """Recursively pull visible text out of a Components V2 tree.
-
-    Components V2 messages (e.g. Carl-bot's bump reply) don't put their
-    text in message.content or message.embeds - it lives nested inside
-    message.components (Container -> Section/TextDisplay, etc).
-
-    NOTE: exact attribute names depend on your discord.py/py-cord version
-    since this API is fairly new. If this stops finding text, print
-    vars(comp) / comp.__dict__ for one component to check the real
-    attribute names and adjust below.
-    """
     texts = []
     for comp in components:
-        # Plain text display component
         content = getattr(comp, "content", None)
         if content:
             texts.append(content)
 
-        # Sections can carry their own text components
         section_components = getattr(comp, "components", None)
         if section_components:
             texts.extend(extract_components_text(section_components))
 
-        # Containers nest further components
         children = getattr(comp, "children", None)
         if children:
             texts.extend(extract_components_text(children))
@@ -138,10 +110,6 @@ def get_bump_service(message: discord.Message):
 
     info = BUMP_SERVICES[message.author.id]
 
-    # Gate: only consider this message if it's actually a response to a bump
-    # invocation - not just any message this bot happens to send. This
-    # matters most for Carl-bot since it also handles moderation, so most of
-    # its messages have nothing to do with bumping at all.
     interaction = getattr(message, "interaction", None) or getattr(
         message, "interaction_metadata", None
     )
@@ -158,9 +126,6 @@ def get_bump_service(message: discord.Message):
                     )
                 return None
         else:
-            # Text command path (c!bump) - no interaction metadata exists for
-            # these, so fall back to checking we recently saw c!bump typed
-            # in this channel.
             now = discord.utils.utcnow().timestamp()
             last_invoked = _pending_carlbot_bump_invocations.get(message.channel.id)
             if (
@@ -180,9 +145,6 @@ def get_bump_service(message: discord.Message):
         text_parts.append(embed.description or "")
         for field in embed.fields:
             text_parts.append(field.value or "")
-
-    # Components V2 text, kept as a fallback in case a bump bot ever sends
-    # this way (Carl-bot turned out not to).
     if message.components:
         text_parts.extend(extract_components_text(message.components))
 
@@ -207,10 +169,12 @@ def get_bump_service(message: discord.Message):
             for field in embed.fields:
                 print(f"[bump-debug] embed[{i}] field {field.name!r}: {field.value!r}")
         if message.components:
-            print(f"[bump-debug] components text: {extract_components_text(message.components)!r}")
+            print(
+                f"[bump-debug] components text: {extract_components_text(message.components)!r}"
+            )
         print(f"[bump-debug] combined lowercased text: {text!r}")
 
-    # avoid false triggers (cooldown / "not yet" messages)
+    # avoid false triggers
     if "cooldown" in text or "bump this server again" in text:
         if BUMP_DEBUG:
             print("[bump-debug] looked like a cooldown/wait message, ignoring")
@@ -225,12 +189,6 @@ def get_bump_service(message: discord.Message):
     return None
 
 
-# Tracks (channel_id, author_id, service_name) pairs we've already fired a
-# handle_bump() for recently, so if a bump message somehow gets checked twice
-# (e.g. on_message + a later edit) we don't double-send the "thanks for
-# bumping" reply. Cleared implicitly since bumps are hours apart - a fresh
-# bump for the same service will naturally get a new fire_at anyway, so this
-# is just to guard against near-instant duplicate events.
 _recent_bump_fires = {}
 _BUMP_DEDUPE_SECONDS = 30
 
@@ -305,8 +263,7 @@ async def check_bump_reminders():
 
                 try:
                     await channel.send(
-                        f"{mention} its time to bump with "
-                        f"**{row['service']}**!"
+                        f"{mention} its time to bump with **{row['service']}**!"
                     )
                 except discord.Forbidden:
                     pass
@@ -322,9 +279,6 @@ async def check_bump_reminders():
 @check_bump_reminders.before_loop
 async def before_check_bump_reminders():
     await bot.wait_until_ready()
-
-
-# ---------------------------------------------------------------------------
 
 
 @bot.bridge_command(name="ping")
@@ -1342,8 +1296,8 @@ async def on_message(message: discord.Message):
 @bot.event
 async def on_message_edit(before: discord.Message, after: discord.Message):
     # Bump detection: some bots edit their reply in after the fact (e.g. to
-    # attach an embed once fetched). Harmless if the bot never edits - this
-    # just won't fire for them.
+    # attach an embed once fetched). Harmless if the bot never edits
+    # this just won't fire for them
     await process_potential_bump(after)
 
     if not before.guild or (before.author and before.author.bot):
