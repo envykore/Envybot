@@ -50,6 +50,237 @@ WARN_MUTE_THRESHOLD = 3
 WARN_MUTE_SECONDS = 600
 
 
+DISBOARD_BOT_ID = 302050872383242240
+CARL_BOT_ID = 235148962103951360
+
+# Discord message flag bit for "IS_COMPONENTS_V2" (1 << 15).
+COMPONENTS_V2_FLAG = 1 << 15
+
+# TODO: make this a per-guild setting (like prefix/log_channel) instead of a
+# hardcoded template name. For now every server just needs a role literally
+# named "Bumper" for pings to work.
+BUMPER_ROLE_NAME = "Bumper"
+
+# Your Carl-bot text-command prefix. Used to detect "c!bump" invocations
+CARLBOT_PREFIX = "c!"
+
+# NOTE: set to false when u confirm matching works
+BUMP_DEBUG = True
+
+BUMP_SERVICES = {
+    DISBOARD_BOT_ID: {
+        "name": "Disboard",
+        "cooldown": 2 * 3600,
+        # Disboard only ever talks about bumping, so this is low-risk, but
+        # keep it specific anyway.
+        "success_phrases": ("bump done",),
+    },
+    CARL_BOT_ID: {
+        "name": "Carl-bot",
+        "cooldown": 5 * 3600,
+        "success_phrases": ("successfully bumped",),
+    },
+}
+
+_pending_carlbot_bump_invocations = {}
+_BUMP_INVOCATION_WINDOW_SECONDS = 10
+
+
+def extract_components_text(components) -> list[str]:
+    texts = []
+    for comp in components:
+        content = getattr(comp, "content", None)
+        if content:
+            texts.append(content)
+
+        section_components = getattr(comp, "components", None)
+        if section_components:
+            texts.extend(extract_components_text(section_components))
+
+        children = getattr(comp, "children", None)
+        if children:
+            texts.extend(extract_components_text(children))
+
+    return texts
+
+
+def get_bump_service(message: discord.Message):
+    if not message.author.bot or message.author.id not in BUMP_SERVICES:
+        return None
+
+    info = BUMP_SERVICES[message.author.id]
+
+    interaction = getattr(message, "interaction", None) or getattr(
+        message, "interaction_metadata", None
+    )
+    invoked_name = getattr(interaction, "name", None)
+
+    if message.author.id == CARL_BOT_ID:
+        if invoked_name is not None:
+            # Slash command path (/bump)
+            if invoked_name.lower() != "bump":
+                if BUMP_DEBUG:
+                    print(
+                        f"[bump-debug] ignoring Carl-bot message - not a /bump "
+                        f"response (was /{invoked_name})"
+                    )
+                return None
+        else:
+            now = discord.utils.utcnow().timestamp()
+            last_invoked = _pending_carlbot_bump_invocations.get(message.channel.id)
+            if (
+                last_invoked is None
+                or now - last_invoked > _BUMP_INVOCATION_WINDOW_SECONDS
+            ):
+                if BUMP_DEBUG:
+                    print(
+                        "[bump-debug] ignoring Carl-bot message - no recent "
+                        f"{CARLBOT_PREFIX}bump invocation in this channel"
+                    )
+                return None
+
+    text_parts = [message.content or ""]
+    for embed in message.embeds:
+        text_parts.append(embed.title or "")
+        text_parts.append(embed.description or "")
+        for field in embed.fields:
+            text_parts.append(field.value or "")
+    if message.components:
+        text_parts.extend(extract_components_text(message.components))
+
+    text = " ".join(text_parts).lower()
+
+    if BUMP_DEBUG:
+        is_components_v2 = bool(message.flags.value & COMPONENTS_V2_FLAG)
+        print(
+            f"[bump-debug] saw message from {info['name']} "
+            f"(author id {message.author.id}) in #{getattr(message.channel, 'name', message.channel.id)}"
+        )
+        print(f"[bump-debug] raw content: {message.content!r}")
+        print(f"[bump-debug] interaction={interaction!r} invoked_name={invoked_name!r}")
+        print(
+            f"[bump-debug] flags={message.flags.value} "
+            f"is_components_v2={is_components_v2} "
+            f"num_components={len(message.components)}"
+        )
+        for i, embed in enumerate(message.embeds):
+            print(f"[bump-debug] embed[{i}] title: {embed.title!r}")
+            print(f"[bump-debug] embed[{i}] description: {embed.description!r}")
+            for field in embed.fields:
+                print(f"[bump-debug] embed[{i}] field {field.name!r}: {field.value!r}")
+        if message.components:
+            print(
+                f"[bump-debug] components text: {extract_components_text(message.components)!r}"
+            )
+        print(f"[bump-debug] combined lowercased text: {text!r}")
+
+    # avoid false triggers
+    if "cooldown" in text or "bump this server again" in text:
+        if BUMP_DEBUG:
+            print("[bump-debug] looked like a cooldown/wait message, ignoring")
+        return None
+
+    matched = any(phrase in text for phrase in info["success_phrases"])
+    if BUMP_DEBUG:
+        print(f"[bump-debug] success phrase matched: {matched}")
+
+    if matched:
+        return info
+    return None
+
+
+_recent_bump_fires = {}
+_BUMP_DEDUPE_SECONDS = 30
+
+
+async def handle_bump(message: discord.Message, service: dict):
+    if not message.guild:
+        return
+
+    dedupe_key = (message.channel.id, message.author.id, service["name"])
+    now = discord.utils.utcnow().timestamp()
+    last_fired = _recent_bump_fires.get(dedupe_key)
+    if last_fired is not None and now - last_fired < _BUMP_DEDUPE_SECONDS:
+        if BUMP_DEBUG:
+            print(f"[bump-debug] ignoring duplicate bump fire for {dedupe_key}")
+        return
+    _recent_bump_fires[dedupe_key] = now
+
+    fire_at = now + service["cooldown"]
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute(
+            """INSERT INTO bump_reminders (guild_id, service, channel_id, fire_at, notified)
+               VALUES (?, ?, ?, ?, 0)
+               ON CONFLICT(guild_id, service) DO UPDATE SET
+                   channel_id = excluded.channel_id,
+                   fire_at = excluded.fire_at,
+                   notified = 0""",
+            (message.guild.id, service["name"], message.channel.id, fire_at),
+        )
+        await db.commit()
+
+    hours = service["cooldown"] // 3600
+    try:
+        await message.channel.send(
+            f"thanks for bumping with **{service['name']}**, "
+            f"ill remind this channel in {hours}h"
+        )
+    except discord.Forbidden:
+        pass
+
+
+async def process_potential_bump(message: discord.Message):
+    if not message.author.bot:
+        return
+    service = get_bump_service(message)
+    if service:
+        await handle_bump(message, service)
+
+
+@tasks.loop(seconds=15)
+async def check_bump_reminders():
+    now = discord.utils.utcnow().timestamp()
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM bump_reminders WHERE fire_at <= ? AND notified = 0", (now,)
+        ) as cursor:
+            due = await cursor.fetchall()
+
+        for row in due:
+            guild = bot.get_guild(row["guild_id"])
+            channel = bot.get_channel(row["channel_id"])
+
+            if channel is not None:
+                role = (
+                    discord.utils.get(guild.roles, name=BUMPER_ROLE_NAME)
+                    if guild
+                    else None
+                )
+                mention = role.mention if role else f"`@{BUMPER_ROLE_NAME}`"
+
+                try:
+                    await channel.send(
+                        f"{mention} its time to bump with **{row['service']}**!"
+                    )
+                except discord.Forbidden:
+                    pass
+
+            await db.execute(
+                "DELETE FROM bump_reminders WHERE guild_id = ? AND service = ?",
+                (row["guild_id"], row["service"]),
+            )
+
+        await db.commit()
+
+
+@check_bump_reminders.before_loop
+async def before_check_bump_reminders():
+    await bot.wait_until_ready()
+
+
 @bot.bridge_command(name="ping")
 async def ping(ctx):
     latency_ms = round(bot.latency * 1000)
@@ -58,7 +289,7 @@ async def ping(ctx):
 
 @bot.bridge_command(name="setprefix")
 @commands.has_permissions(manage_guild=True)
-async def setprefix(ctx, new_prefix: str = None):
+async def setprefix(ctx, new_prefix: str | None = None):
     if new_prefix is None:
         cur = prefixes.get(str(ctx.guild.id), DEFAULT_PREFIX)
         await ctx.respond(
@@ -110,8 +341,7 @@ async def post_mod_log(ctx, *, title, color, fields):
 @bot.bridge_command(name="clear")
 @commands.has_permissions(manage_messages=True)
 async def clear(ctx, amount: int = 5):
-    if amount > 100:
-        amount = 100
+    amount = min(amount, 100)
 
     if ctx.is_app:
         deleted = await ctx.channel.purge(limit=amount)
@@ -195,8 +425,7 @@ async def mute(
     if not seconds:
         await ctx.respond("couldn't parse that, try `10m` or `1h30m`")
         return
-    if seconds > 2419200:
-        seconds = 2419200
+    seconds = min(seconds, 2419200)
 
     try:
         until = discord.utils.utcnow() + timedelta(seconds=seconds)
@@ -511,7 +740,7 @@ async def poll(
     opt7: str | None = None,
     opt8: str | None = None,
     opt9: str | None = None,
-    opt10: str | None = None,   
+    opt10: str | None = None,
 ):
     options = [
         o for o in (opt1, opt2, opt3, opt4, opt5, opt6, opt7, opt8, opt9, opt10) if o
@@ -592,6 +821,18 @@ async def init_db():
                 emoji TEXT NOT NULL,
                 role_id INTEGER NOT NULL,
                 PRIMARY KEY (message_id, emoji)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bump_reminders (
+                guild_id INTEGER NOT NULL,
+                service TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
+                fire_at REAL NOT NULL,
+                notified INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, service)
             )
             """
         )
@@ -842,6 +1083,15 @@ async def cmds(ctx):
         value="cancels one of your reminders",
         inline=False,
     )
+    embed.add_field(
+        name="Bump reminders",
+        value=(
+            "Automatic — detects successful `/bump` from Disboard (2h) and "
+            f"Carl-bot (5h), then pings the `{BUMPER_ROLE_NAME}` role when "
+            "the cooldown is up. No command needed."
+        ),
+        inline=False,
+    )
     await ctx.respond(embed=embed)
 
 
@@ -989,17 +1239,30 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 
 
 async def get_reaction_role(message_id: int, emoji: str):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute(
+    async with (
+        aiosqlite.connect(DB_FILE) as db,
+        db.execute(
             "SELECT role_id FROM reaction_roles WHERE message_id = ? AND emoji = ?",
             (message_id, emoji),
-        ) as cursor:
-            row = await cursor.fetchone()
-    return row[0] if row else None
+        ) as cursor,
+    ):
+        row = await cursor.fetchone()
+        return row[0] if row else None
 
 
 @bot.event
 async def on_message(message: discord.Message):
+    if (
+        message.guild
+        and not message.author.bot
+        and message.content.strip().lower().startswith(f"{CARLBOT_PREFIX}bump")
+    ):
+        _pending_carlbot_bump_invocations[message.channel.id] = (
+            discord.utils.utcnow().timestamp()
+        )
+
+    await process_potential_bump(message)
+
     if message.guild and not message.author.bot:
         key = (message.guild.id, message.author.id)
         now = discord.utils.utcnow().timestamp()
@@ -1032,6 +1295,11 @@ async def on_message(message: discord.Message):
 
 @bot.event
 async def on_message_edit(before: discord.Message, after: discord.Message):
+    # Bump detection: some bots edit their reply in after the fact (e.g. to
+    # attach an embed once fetched). Harmless if the bot never edits
+    # this just won't fire for them
+    await process_potential_bump(after)
+
     if not before.guild or (before.author and before.author.bot):
         return
     if before.content == after.content:
@@ -1108,6 +1376,9 @@ async def on_ready():
 
     if not check_reminders.is_running():
         check_reminders.start()
+
+    if not check_bump_reminders.is_running():
+        check_bump_reminders.start()
 
 
 async def main():
