@@ -77,7 +77,7 @@ BUMP_SERVICES = {
     },
     CARL_BOT_ID: {
         "name": "Carl-bot",
-        "cooldown": 5 * 3600,
+        "cooldown": 6* 3600,
         "success_phrases": ("successfully bumped",),
     },
 }
