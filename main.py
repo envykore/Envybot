@@ -6,9 +6,11 @@ import discord
 from discord.ext import bridge
 from dotenv import load_dotenv
 
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path, override=True)
+
 from common import get_prefix
 
-load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN not found in the .env file")
@@ -32,11 +34,6 @@ STARTUP_COGS = (
 )
 
 
-@bot.event
-async def on_ready():
-    print(f"logged in as {bot.user}")
-
-
 async def main():
     async with bot:
         for cog in STARTUP_COGS:
@@ -49,4 +46,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-# git commit -m "BOT REWRITE IN... idk really"

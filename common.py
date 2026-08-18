@@ -12,10 +12,15 @@ prefixes = {}
 log_channels = {}
 
 # .env comma list, e.g. ADMIN_IDS=123,456
-ADMIN_IDS = {
-    int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()
-}
+raw_env = os.getenv("ADMIN_IDS", "")
+print(f"DEBUG RAW ENV STRING: repr({raw_env})") # Shows hidden characters/quotes
 
+ADMIN_IDS = {
+    int(x.strip('"\' '))
+    for x in raw_env.split(",")
+    if x.strip('"\' ').isdigit()
+}
+print(f"DEBUG PARSED SET: {ADMIN_IDS}")
 
 def get_prefix(bot_, message):
     from discord.ext import commands
