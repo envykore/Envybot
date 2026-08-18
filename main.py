@@ -49,4 +49,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-# git commit -m "finally"
+# git commit -m "BOT REWRITE IN... idk really"
