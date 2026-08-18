@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Env / secrets
+.env
+*.db
+*.sqlite3
+
+# Editor/OS cruft
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
